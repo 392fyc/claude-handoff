@@ -1,0 +1,13 @@
+{
+  "name": "claude-handoff-local",
+  "owner": {
+    "name": "392fyc"
+  },
+  "plugins": [
+    {
+      "name": "claude-handoff",
+      "source": "./",
+      "description": "Session handoff & auto-continuation for Claude Code"
+    }
+  ]
+}
