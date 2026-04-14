@@ -4,6 +4,10 @@
     "name": "392fyc",
     "url": "https://github.com/392fyc"
   },
+  "metadata": {
+    "description": "Single-plugin marketplace hosting claude-handoff",
+    "version": "1.0.0-alpha.1"
+  },
   "plugins": [
     {
       "name": "claude-handoff",
