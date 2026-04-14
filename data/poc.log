@@ -1,0 +1,4 @@
+2026-04-14 22:10:01 INFO [session-start] SessionStart fired: session=test-session cwd=D:\Mercury\AgentKB
+2026-04-14 22:10:01 INFO [session-start] Found handoff document (2776 chars), injecting into session
+2026-04-14 22:13:06 INFO [session-start] SessionStart fired: session=test-verify cwd=D:\Mercury\AgentKB
+2026-04-14 22:13:06 INFO [session-start] Found handoff document (2776 chars), injecting into session

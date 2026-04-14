@@ -73,14 +73,18 @@ def main() -> None:
     logging.info("Found handoff document (%d chars), injecting into session", len(content))
 
     # Output as additionalContext — Claude sees this at session start
+    # Must use hookSpecificOutput wrapper for Claude to parse it
     output = {
-        "additionalContext": (
-            "<session-handoff>\n"
-            "A previous session created this handoff document for you. "
-            "Read it carefully and continue the work described.\n\n"
-            f"{content}\n"
-            "</session-handoff>"
-        )
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": (
+                "<session-handoff>\n"
+                "A previous session created this handoff document for you. "
+                "Read it carefully and continue the work described.\n\n"
+                f"{content}\n"
+                "</session-handoff>"
+            ),
+        }
     }
     print(json.dumps(output))
 
