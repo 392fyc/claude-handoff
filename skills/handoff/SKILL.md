@@ -99,23 +99,38 @@ Do **both** of these — never skip either:
    ```
    This file is automatically loaded by Claude's auto-memory system on next session start.
 
-## Step 4: Auto-Continuation
+## Step 4: Pre-Termination Checklist
 
-After saving the handoff document, launch a new session that automatically starts working.
+Before handing off, the old session MUST confirm that all of its in-flight work has finished. A handoff is a terminal event — anything the old session was doing will NOT automatically continue in the new one.
 
-The launch command passes the Starting Prompt as the first user message so the new session begins immediately — no paste required.
+Verify each of these before launching the new session:
+
+- **No pending tool calls.** All Bash commands, file writes, and tool operations have returned.
+- **No background processes.** Any `run_in_background` tasks, long-running builds, or subprocesses the session spawned have completed (or the user has explicitly acknowledged they are still running).
+- **No unsaved state.** Any edits, commits, or writes the user expected are actually on disk.
+- **No pending user questions.** If the old session owes the user a reply or a choice, answer it first.
+
+If any of the above is incomplete, finish or explicitly defer it before proceeding. Surface the status to the user: "All pending work done — ready to hand off?"
+
+## Step 5: Hand Off to a New Session
+
+The purpose of handoff is **to terminate the current session and have a fresh session take over**. Once Step 4 is clean, the old session has no further output to produce after the handoff document is written — its job is done.
+
+After saving the handoff document, offer to launch a new session. The launch command passes the Starting Prompt as the first user message so the new session begins immediately — no paste required.
 
 ```bash
-# Windows (new terminal tab with initial prompt)
-wt -w 0 nt --title "Handoff" -- claude "Read the session handoff document below and continue the task described in it. Acknowledge the handoff and begin."
+# Windows (new terminal tab; old session should /exit afterwards)
+wt -w 0 nt --title "Handoff" -- claude "Read the session handoff document at ~/.claude/projects/<encoded_cwd>/memory/session-handoff.md and continue the task described in it. Acknowledge the handoff and begin."
 
-# macOS/Linux
-claude "Read the session handoff document below and continue the task described in it. Acknowledge the handoff and begin." &
+# macOS/Linux (background new session, old terminal ready to exit)
+claude "Read the session handoff document and continue." &
 ```
 
 The SessionStart hook will inject the full handoff document as additionalContext, so the new session has everything it needs.
 
-Ask the user to confirm before launching ("Launch continuation session?").
+Ask the user to confirm before launching ("Launch continuation session? The current session will end after handoff.").
+
+After the user confirms the new session is running, the old session should cleanly terminate (user types `/exit` or closes the terminal). Do not continue producing output in the old session — context has been transferred.
 
 ## Rules
 
@@ -124,3 +139,5 @@ Ask the user to confirm before launching ("Launch continuation session?").
 - Never include secrets, API keys, or credentials
 - The chat-output prompt is the PRIMARY deliverable — do not skip it
 - Do NOT add automatic hooks for SessionEnd or PreCompact — handoff is explicit only
+- Handoff is a **terminal** event for the old session — no further output is needed after the new session is launched
+- Before terminating, verify all pending work (tool calls, background processes, unsaved state, unanswered questions) has completed — nothing carries over automatically to the new session

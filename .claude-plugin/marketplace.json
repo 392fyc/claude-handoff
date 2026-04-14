@@ -1,13 +1,15 @@
 {
-  "name": "claude-handoff-local",
+  "name": "claude-handoff",
   "owner": {
-    "name": "392fyc"
+    "name": "392fyc",
+    "url": "https://github.com/392fyc"
   },
   "plugins": [
     {
       "name": "claude-handoff",
       "source": "./",
-      "description": "Session handoff & auto-continuation for Claude Code"
+      "description": "Session handoff & auto-continuation for Claude Code",
+      "homepage": "https://github.com/392fyc/claude-handoff"
     }
   ]
 }
