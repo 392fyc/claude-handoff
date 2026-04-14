@@ -1,0 +1,10 @@
+{
+  "name": "claude-handoff",
+  "version": "0.1.0",
+  "description": "Session handoff & auto-continuation for Claude Code. Preserves context across compaction boundaries, generates structured handoff documents, and enables one-click session continuation.",
+  "author": {
+    "name": "392fyc"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
