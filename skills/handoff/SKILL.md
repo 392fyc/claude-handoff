@@ -78,18 +78,23 @@ Do **both** of these — never skip either:
    ```
    This file is automatically loaded by Claude's auto-memory system on next session start.
 
-## Step 4: Optional Auto-Continuation
+## Step 4: Auto-Continuation
 
-Ask the user: "Launch a new session to continue?"
+After saving the handoff document, launch a new session that automatically starts working.
 
-If yes:
+The launch command passes the Starting Prompt as the first user message so the new session begins immediately — no paste required.
+
 ```bash
-# Windows (new terminal tab)
-wt -w 0 nt --title "Handoff" -- claude
+# Windows (new terminal tab with initial prompt)
+wt -w 0 nt --title "Handoff" -- claude "Read the session handoff document below and continue the task described in it. Acknowledge the handoff and begin."
 
 # macOS/Linux
-claude &
+claude "Read the session handoff document below and continue the task described in it. Acknowledge the handoff and begin." &
 ```
+
+The SessionStart hook will inject the full handoff document as additionalContext, so the new session has everything it needs.
+
+Ask the user to confirm before launching ("Launch continuation session?").
 
 ## Rules
 

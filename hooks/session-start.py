@@ -1,8 +1,9 @@
 """
-POC: SessionStart hook — inject last checkpoint into session context.
+SessionStart hook — inject handoff document into new session context.
 
-Reads the most recent session-checkpoint.md from auto-memory and outputs
-it as additionalContext so the new session has continuity.
+When a previous session wrote a handoff document via /handoff, this hook
+reads it and outputs it as additionalContext so the new session can
+immediately continue the work without any user intervention.
 """
 from __future__ import annotations
 
@@ -49,31 +50,37 @@ def main() -> None:
     cwd = hook_input.get("cwd", "")
 
     logging.info("SessionStart fired: session=%s cwd=%s", session_id, cwd)
-    logging.info("[POC] Hook input keys: %s", sorted(hook_input.keys()))
 
     if not cwd:
         logging.info("SKIP: no cwd")
         return
 
-    # Look for session checkpoint in auto-memory
+    # Look for handoff document in auto-memory
     encoded = encode_project_path(cwd)
     memory_dir = Path.home() / ".claude" / "projects" / encoded / "memory"
-    checkpoint = memory_dir / "session-checkpoint.md"
 
-    if not checkpoint.exists():
-        logging.info("No checkpoint found at %s", checkpoint)
+    # Try handoff doc first, then checkpoint
+    handoff = memory_dir / "session-handoff.md"
+    if not handoff.exists():
+        logging.info("No handoff document at %s", handoff)
         return
 
-    content = checkpoint.read_text(encoding="utf-8").strip()
+    content = handoff.read_text(encoding="utf-8").strip()
     if not content:
-        logging.info("Checkpoint is empty")
+        logging.info("Handoff document is empty")
         return
 
-    logging.info("[POC] SUCCESS: Found checkpoint (%d chars), injecting into session", len(content))
+    logging.info("Found handoff document (%d chars), injecting into session", len(content))
 
-    # Output additionalContext for Claude to see
+    # Output as additionalContext — Claude sees this at session start
     output = {
-        "additionalContext": f"<session-restore>\n{content}\n</session-restore>"
+        "additionalContext": (
+            "<session-handoff>\n"
+            "A previous session created this handoff document for you. "
+            "Read it carefully and continue the work described.\n\n"
+            f"{content}\n"
+            "</session-handoff>"
+        )
     }
     print(json.dumps(output))
 
