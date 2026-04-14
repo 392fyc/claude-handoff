@@ -16,18 +16,38 @@ You are executing the handoff skill. This is the **only** entry point for handof
 
 ## Step 1: Gather Context
 
-Collect the current state of the project by running these in parallel:
+Build a comprehensive picture of the current session by layering these sources. Each layer is **optional** — use whatever is available.
 
-1. `git status` — uncommitted changes
-2. `git log --oneline -5` — recent commits
-3. `git branch --show-current` — current branch
-4. `gh issue list --state open --limit 5 2>/dev/null` — open issues (skip if gh unavailable)
+### Layer 1: Conversation Context (always available)
+You already have the full conversation in your context window. Synthesize:
+- What the user was working on
+- Decisions made and their rationale
+- Problems encountered and solutions found
+- Incomplete work and known next steps
 
-Also read the session checkpoint if one exists from a previous handoff:
+### Layer 2: Memory Search (agentic)
+Search the project's auto-memory directory for related context:
 ```
-~/.claude/projects/<encoded_cwd>/memory/session-checkpoint.md
+~/.claude/projects/<encoded_cwd>/memory/
 ```
-Where `<encoded_cwd>` is the current working directory with `:` `\` `/` replaced by `-`, leading `-` stripped.
+Where `<encoded_cwd>` is the cwd with `:` `\` `/` replaced by `-`, leading `-` stripped.
+
+Glob for `*.md` files there. Read any that seem relevant — previous handoffs, checkpoints, project memories. Cross-reference with what you know from the conversation.
+
+### Layer 3: Project Documentation (if present)
+Check for project-level docs that provide architectural context:
+- `CLAUDE.md` in the project root or parent directories
+- `AGENTS.md`, `README.md`, or similar
+
+Only skim — extract what's relevant to the handoff, not the full content.
+
+### Layer 4: Version Control (optional, if available)
+If the project uses git, gather supplementary state. **Do not fail if git is unavailable.**
+```bash
+git status --short 2>/dev/null
+git log --oneline -5 2>/dev/null
+git branch --show-current 2>/dev/null
+```
 
 ## Step 2: Generate Handoff Document
 
@@ -45,14 +65,14 @@ type: project
 
 <A ready-to-paste instruction block for the next session. Must be
 COMPLETELY self-contained — the next session has NO prior context.
-Include repo paths, branch names, file locations, and specific next steps.>
+Include working directory, file locations, and specific next steps.>
 
 ## Current State
 
-- **Repo**: <repo path>
-- **Branch**: <branch name>
-- **Last commit**: <hash + message>
-- **Working tree**: <clean / summary of changes>
+<Project state snapshot. Adapt to what's relevant:>
+- **Working directory**: <path>
+- **Branch / version**: <if applicable>
+- **Uncommitted work**: <files changed, or "clean">
 
 ## Task State
 
@@ -63,7 +83,8 @@ Include repo paths, branch names, file locations, and specific next steps.>
 ## Key Context
 
 <Non-obvious facts the next session needs. Things NOT derivable from
-code or git history — decisions, gotchas, environment quirks.>
+reading the code — decisions, gotchas, environment quirks, relationship
+between components.>
 ```
 
 ## Step 3: Output & Save
