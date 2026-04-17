@@ -180,6 +180,28 @@ class SessionChainDB:
             ).fetchall()
             return [e for e in (_row_to_entry(r) for r in rows) if e is not None]
 
+    def find_pending_by_project(self, project_dir: str) -> Optional[ChainEntry]:
+        """Find the most recent pending handoff (child_session_id IS NULL) for
+        the given project_dir. Returns None if no pending row exists.
+
+        Used by session-start.py to auto-detect a parent session when a new
+        session starts inside the same project directory.
+        """
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT id, chain_id, parent_session_id, child_session_id,
+                       handoff_ts, project_dir, task_ref
+                  FROM session_chains
+                 WHERE child_session_id IS NULL
+                   AND project_dir = ?
+                 ORDER BY handoff_ts DESC
+                 LIMIT 1
+                """,
+                (project_dir,),
+            ).fetchone()
+            return _row_to_entry(row)
+
     def list_chain(self, chain_id: str) -> list[ChainEntry]:
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
