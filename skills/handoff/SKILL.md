@@ -275,67 +275,42 @@ Optional: offer to launch if the user later says so (Step 6).
 
 After Step 5.1 + 5.2, and Pre-Termination Checklist passed:
 
-**Required launch pattern — write prompt to a temp file, then pass via
-`claude -- "$(...)"` to defeat option parsing and shell-escape hazards.**
-The inline string forms below are shown only as the final shape of the
-command; do NOT concatenate an unescaped prompt directly into the command
-line.
+**Required launch pattern — use a SHORT reference prompt, never inline the
+full handoff content into the command line.** The SessionStart hook already
+injects the full handoff document as `additionalContext`, so the new session
+receives everything automatically. Inlining multi-line/multi-KB content
+into `wt`/`tmux`/shell commands causes catastrophic failures on Windows
+(multi-line expansion breaks argument parsing → error 0x80070002, multiple
+ghost terminal windows).
 
-**Prerequisites**: auto-mode launch assumes a POSIX-like shell (`mktemp`,
-`chmod`, `cat`, heredoc). On Windows this means **Git Bash / MSYS2 / WSL**
-(which Mercury uses) — native `cmd.exe` and non-interactive PowerShell do
-**not** satisfy this. If the host shell is not POSIX-compatible, fall back
-to manual mode or use the PowerShell equivalent shown further below.
+**Short prompt construction**: compute the handoff doc path (same path
+written in Step 2), then build a one-liner:
 
-**Command-line length**: `claude` receives the prompt as a single positional
-argument, which is subject to OS argv limits (Windows `CreateProcess` ≈
-32 KB, Linux/macOS 128 KB+). Typical handoff prompts (~1–3 KB) are well
-under any limit. For abnormally large prompts (> 30 KB on Windows), pipe
-the file to `claude` via stdin or split the prompt into a separate
-`--input-file`-style mechanism (check `claude --help` on the installed
-version; stdin support is documented at
-<https://code.claude.com/docs/en/cli-reference>).
-
-```bash
-# Step A (POSIX shells — Git Bash, WSL, macOS, Linux):
-# write the verbatim prompt to a locked-down temp file.
-TMP=$(mktemp) && chmod 600 "$TMP" && cat > "$TMP" <<'PROMPT_EOF'
-<STARTING_PROMPT_VERBATIM>
-PROMPT_EOF
+```
+HANDOFF_PATH=~/.claude/projects/<encoded_cwd>/memory/session-handoff.md
+SHORT_PROMPT="Continue from session handoff. The SessionStart hook injects the full document. Fallback: read ${HANDOFF_PATH}"
 ```
 
-```powershell
-# Step A (PowerShell on Windows, if no Git Bash):
-$TMP = [System.IO.Path]::GetTempFileName()
-Set-Content -LiteralPath $TMP -Value @'
-<STARTING_PROMPT_VERBATIM>
-'@
-# PowerShell $TMP permissions default to user-only on NTFS.
-```
+Replace `<encoded_cwd>` using the same `encode_project_path()` logic from
+Step 2 (`:` `\` `/` → `-`, strip leading `-`).
 
-**Windows** (Windows Terminal, new tab — `wt` opens a real new tab):
+**Windows** (Windows Terminal, new tab):
 ```bash
-wt -w 0 nt --title "Handoff" -- claude -- "$(cat "$TMP")"
+wt -w 0 nt --title "Handoff" -d "<cwd>" -- claude -- "$SHORT_PROMPT"
 ```
 
 **macOS / Linux with tmux** (real new window, detached from current TTY):
 ```bash
-tmux new-window -n handoff "claude -- \"\$(cat $TMP)\""
+tmux new-window -n handoff "claude -- '$SHORT_PROMPT'"
 ```
 
 **macOS / Linux without tmux** — there is no portable "new terminal"
-primitive. `claude "..." &` only backgrounds the process in the **current
-shell**; it will inherit the current TTY and die when the shell exits or
-the tab is closed. If you need real isolation, use `tmux new-session -d`
-or the terminal emulator's own CLI (e.g. `osascript -e 'tell app
-"Terminal" to do script ...'` on macOS, `gnome-terminal --` on Linux).
-Otherwise fall back to manual mode and let the user open the new session
-themselves.
+primitive. Use `tmux new-session -d` or the terminal emulator's own CLI
+(e.g. `osascript -e 'tell app "Terminal" to do script ...'` on macOS,
+`gnome-terminal --` on Linux). Otherwise fall back to manual mode.
 
 ```bash
-# Detached tmux session (survives current shell exit):
-tmux new-session -d -s handoff "claude -- \"\$(cat $TMP)\""
-# Then `tmux attach -t handoff` from the user's preferred terminal.
+tmux new-session -d -s handoff "claude -- '$SHORT_PROMPT'"
 ```
 
 The positional argument after `--` is the session's first user message —
@@ -343,22 +318,8 @@ documented at <https://code.claude.com/docs/en/cli-reference>. The `--`
 sentinel ensures a prompt beginning with `-` is not parsed as a CLI option
 (<https://github.com/anthropics/claude-code/issues/3844>). The
 SessionStart hook will inject the full handoff document as
-`additionalContext`, so the new session has everything.
-
-**Cleanup (always run, regardless of branch taken)**:
-
-```bash
-# POSIX: run after launch succeeds; use trap for failure paths.
-trap 'rm -f "$TMP"' EXIT
-```
-
-```powershell
-# PowerShell: run after launch; use try/finally for failure paths.
-try { <launch command> } finally { Remove-Item -LiteralPath $TMP -Force -ErrorAction SilentlyContinue }
-```
-
-This guarantees the handoff prompt (which may reference internal paths
-or planning context) never persists on disk past the launch moment.
+`additionalContext`, so the new session has everything — the short prompt
+is a bootstrap trigger, not the content carrier.
 
 After spawning the new process, do NOT continue producing output in the old
 session. The old session's job is done. Advise user to `/exit` (or close
