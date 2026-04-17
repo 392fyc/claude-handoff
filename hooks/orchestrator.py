@@ -106,11 +106,11 @@ async def start_continuation_session(
         query,
     )
 
-    handoff_content = handoff_doc.read_text(encoding="utf-8")
-
+    handoff_path = handoff_doc.resolve()
     prompt = (
-        "Continue from previous session handoff:\n\n"
-        f"{handoff_content}\n\n"
+        "Continue from session handoff. "
+        "The SessionStart hook injects the full document as additionalContext. "
+        f"Fallback: read {handoff_path}. "
         "Acknowledge the handoff and begin with the first pending task."
     )
 
@@ -198,19 +198,19 @@ def start_visible_session(handoff_doc: Path, cwd: str) -> None:
                 "wt", "-w", "0", "new-tab",
                 "--title", "Claude Continuation",
                 "-d", cwd,
-                "--", "cmd", "/k", "claude", short_prompt,
+                "--", "cmd", "/k", "claude", "--", short_prompt,
             ])
         else:
             _sp.Popen([
                 "cmd", "/c", "start", '""',
-                "/d", cwd, "cmd", "/k", "claude", short_prompt,
+                "/d", cwd, "cmd", "/k", "claude", "--", short_prompt,
             ])
     else:
         launched = False
         for term_cmd in [
-            ["gnome-terminal", "--", "claude", prompt],
-            ["xterm", "-e", "claude", prompt],
-            ["claude", prompt],
+            ["gnome-terminal", "--", "claude", "--", prompt],
+            ["xterm", "-e", "claude", "--", prompt],
+            ["claude", "--", prompt],
         ]:
             try:
                 _sp.Popen(term_cmd, cwd=cwd)
