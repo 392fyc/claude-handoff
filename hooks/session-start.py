@@ -72,14 +72,26 @@ def _try_link_chain(session_id: str, cwd: str) -> str:
             child_session_id=session_id,
         )
         if bound:
-            task_part = f" | task: {pending.task_ref}" if pending.task_ref else ""
+            linked = db.find_parent(session_id)
+            if (
+                linked is None
+                or linked.chain_id != pending.chain_id
+                or linked.project_dir != pending.project_dir
+            ):
+                logging.warning(
+                    "chain: bind verification failed for child=%s "
+                    "(expected chain=%s project=%s)",
+                    session_id, pending.chain_id, pending.project_dir,
+                )
+                return ""
+            task_part = f" | task: {linked.task_ref}" if linked.task_ref else ""
             info = (
-                f"[session_chain] Parent session: {pending.parent_session_id}"
-                f" | chain: {pending.chain_id}{task_part}"
+                f"[session_chain] Parent session: {linked.parent_session_id}"
+                f" | chain: {linked.chain_id}{task_part}"
             )
             logging.info(
                 "chain: bound child=%s to parent=%s chain=%s",
-                session_id, pending.parent_session_id, pending.chain_id,
+                session_id, linked.parent_session_id, linked.chain_id,
             )
             return info
         else:

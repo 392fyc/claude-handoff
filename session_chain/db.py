@@ -195,7 +195,7 @@ class SessionChainDB:
                   FROM session_chains
                  WHERE child_session_id IS NULL
                    AND project_dir = ?
-                 ORDER BY handoff_ts DESC
+                 ORDER BY handoff_ts DESC, id DESC
                  LIMIT 1
                 """,
                 (project_dir,),
