@@ -1,12 +1,11 @@
 """session_chain — cross-session continuity tracking for claude-handoff.
 
-STATUS: scaffold (v0.1.0-experimental) — schema + read/write API is defined
-        but NOT yet wired into session-start.py or the handoff skill.
-        Implementation continuation: see docs/SESSION_CHAIN_HANDOFF.md.
+STATUS: v0.2.0 — DB API complete and wired into session-start.py.
+        find_pending_by_project + concurrent write safety verified.
 
 Provides a SQLite-backed `session_chains` table that records parent↔child
-session handoff links. Future Mercury Phase 4-2.a will consume this API from
-inside the claude-handoff SessionStart hook and the /handoff skill.
+session handoff links. The claude-handoff SessionStart hook consumes this API
+to auto-detect pending parent sessions and inject chain context.
 """
 
 from .db import (
@@ -16,4 +15,4 @@ from .db import (
 )
 
 __all__ = ["SessionChainDB", "ChainEntry", "DEFAULT_DB_PATH"]
-__version__ = "0.1.0-experimental"
+__version__ = "0.2.0"
