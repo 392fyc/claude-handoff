@@ -193,17 +193,20 @@ def start_visible_session(handoff_doc: Path, cwd: str) -> None:
 
         if shutil.which("wt"):
             # -w 0 targets the most recently used Windows Terminal window
-            # (opens a new tab, not a new window).
+            # (opens a new tab, not a new window). Call claude directly — do NOT
+            # go through `cmd /k`: cmd's argv-to-shell reassembly handles the
+            # `--` sentinel + prompt unreliably, producing a tab that opens but
+            # never launches claude (Issue #9).
             _sp.Popen([
                 "wt", "-w", "0", "new-tab",
                 "--title", "Claude Continuation",
                 "-d", cwd,
-                "--", "cmd", "/k", "claude", "--", short_prompt,
+                "--", "claude", "--", short_prompt,
             ])
         else:
             _sp.Popen([
                 "cmd", "/c", "start", '""',
-                "/d", cwd, "cmd", "/k", "claude", "--", short_prompt,
+                "/d", cwd, "claude", "--", short_prompt,
             ])
     else:
         launched = False
