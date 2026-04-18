@@ -1,7 +1,7 @@
 """SQLite session_chains schema + read/write API.
 
-STATUS: scaffold v0.1.0-experimental — schema stable enough for migration
-        but NOT yet integrated with session-start.py or /handoff skill.
+STATUS: v0.3.0 — schema v2 adds worktree_path as first-class column.
+        Includes auto-migration from v1 DBs via ALTER TABLE ADD COLUMN.
 
 Schema invariants:
 - `chain_id` is the logical chain root (typically = the first session's id in
@@ -9,9 +9,12 @@ Schema invariants:
 - `(parent_session_id, child_session_id)` is the unique handoff edge.
 - `child_session_id` may be NULL when a handoff is pending (old session has
   emitted the handoff but new session has not started yet).
+- `worktree_path` is nullable; carries the git worktree path across handoffs
+  so session-start.py can cd to the correct worktree automatically.
 - Timestamps stored as ISO-8601 UTC strings for sqlite-cli readability.
 
 Mercury issue: 392fyc/Mercury#246
+claude-handoff issue: 392fyc/claude-handoff#7
 KB concept: sqlite-upsert-semantics (never use INSERT OR REPLACE for partial
              updates — it deletes unspecified columns).
 """
@@ -32,7 +35,10 @@ DEFAULT_DB_PATH = Path(
 )
 
 
-SCHEMA = """
+# Base schema (v1 shape) — CREATE TABLE IF NOT EXISTS so it is safe to run
+# on an already-initialized DB.  The v1→v2 migration below adds worktree_path
+# via ALTER TABLE after this executes.
+SCHEMA_BASE_V1 = """
 CREATE TABLE IF NOT EXISTS session_chains (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     chain_id            TEXT    NOT NULL,
@@ -65,6 +71,7 @@ class ChainEntry:
     handoff_ts: str
     project_dir: Optional[str] = None
     task_ref: Optional[str] = None
+    worktree_path: Optional[str] = None
     id: Optional[int] = None
 
 
@@ -82,7 +89,27 @@ class SessionChainDB:
 
     def _init_schema(self) -> None:
         with closing(self._connect()) as conn, conn:
-            conn.executescript(SCHEMA)
+            conn.executescript(SCHEMA_BASE_V1)
+            # Detect current schema version
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='version'"
+            ).fetchone()
+            current = int(row["value"]) if row else 1
+            if current < 2:
+                # Use PRAGMA table_info to make ADD COLUMN idempotent
+                cols = [
+                    r["name"]
+                    for r in conn.execute(
+                        "PRAGMA table_info(session_chains)"
+                    ).fetchall()
+                ]
+                if "worktree_path" not in cols:
+                    conn.execute(
+                        "ALTER TABLE session_chains ADD COLUMN worktree_path TEXT"
+                    )
+                conn.execute(
+                    "UPDATE schema_meta SET value='2' WHERE key='version'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -102,12 +129,18 @@ class SessionChainDB:
         child_session_id: Optional[str] = None,
         project_dir: Optional[str] = None,
         task_ref: Optional[str] = None,
+        worktree_path: Optional[str] = None,
         handoff_ts: Optional[str] = None,
     ) -> int:
         """Insert a handoff edge. Upsert-safe: if (parent, child) already exists,
-        update the mutable fields (project_dir, task_ref, handoff_ts) via the
-        ON CONFLICT DO UPDATE path — never via INSERT OR REPLACE, which would
-        destroy columns that are omitted (see KB `sqlite-upsert-semantics`).
+        update the mutable fields (project_dir, task_ref, worktree_path,
+        handoff_ts) via the ON CONFLICT DO UPDATE path — never via INSERT OR
+        REPLACE, which would destroy columns that are omitted (see KB
+        `sqlite-upsert-semantics`).
+
+        COALESCE guards: project_dir, task_ref, and worktree_path are protected
+        from None overrides — an upsert with a NULL value preserves the
+        existing non-NULL column value.
         """
         ts = handoff_ts or self._now_iso()
         with closing(self._connect()) as conn, conn:
@@ -115,17 +148,18 @@ class SessionChainDB:
                 """
                 INSERT INTO session_chains
                     (chain_id, parent_session_id, child_session_id,
-                     handoff_ts, project_dir, task_ref)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     handoff_ts, project_dir, task_ref, worktree_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (parent_session_id, child_session_id)
                 DO UPDATE SET
-                    chain_id    = excluded.chain_id,
-                    handoff_ts  = excluded.handoff_ts,
-                    project_dir = COALESCE(excluded.project_dir, session_chains.project_dir),
-                    task_ref    = COALESCE(excluded.task_ref,    session_chains.task_ref)
+                    chain_id      = excluded.chain_id,
+                    handoff_ts    = excluded.handoff_ts,
+                    project_dir   = COALESCE(excluded.project_dir,   session_chains.project_dir),
+                    task_ref      = COALESCE(excluded.task_ref,      session_chains.task_ref),
+                    worktree_path = COALESCE(excluded.worktree_path, session_chains.worktree_path)
                 """,
                 (chain_id, parent_session_id, child_session_id,
-                 ts, project_dir, task_ref),
+                 ts, project_dir, task_ref, worktree_path),
             )
             return cursor.lastrowid or 0
 
@@ -156,7 +190,7 @@ class SessionChainDB:
             row = conn.execute(
                 """
                 SELECT id, chain_id, parent_session_id, child_session_id,
-                       handoff_ts, project_dir, task_ref
+                       handoff_ts, project_dir, task_ref, worktree_path
                   FROM session_chains
                  WHERE child_session_id = ?
                  ORDER BY id DESC
@@ -171,7 +205,7 @@ class SessionChainDB:
             rows = conn.execute(
                 """
                 SELECT id, chain_id, parent_session_id, child_session_id,
-                       handoff_ts, project_dir, task_ref
+                       handoff_ts, project_dir, task_ref, worktree_path
                   FROM session_chains
                  WHERE parent_session_id = ?
                  ORDER BY handoff_ts ASC
@@ -191,7 +225,7 @@ class SessionChainDB:
             row = conn.execute(
                 """
                 SELECT id, chain_id, parent_session_id, child_session_id,
-                       handoff_ts, project_dir, task_ref
+                       handoff_ts, project_dir, task_ref, worktree_path
                   FROM session_chains
                  WHERE child_session_id IS NULL
                    AND project_dir = ?
@@ -207,7 +241,7 @@ class SessionChainDB:
             rows = conn.execute(
                 """
                 SELECT id, chain_id, parent_session_id, child_session_id,
-                       handoff_ts, project_dir, task_ref
+                       handoff_ts, project_dir, task_ref, worktree_path
                   FROM session_chains
                  WHERE chain_id = ?
                  ORDER BY handoff_ts ASC
@@ -228,4 +262,5 @@ def _row_to_entry(row: Optional[sqlite3.Row]) -> Optional[ChainEntry]:
         handoff_ts=row["handoff_ts"],
         project_dir=row["project_dir"],
         task_ref=row["task_ref"],
+        worktree_path=row["worktree_path"],
     )

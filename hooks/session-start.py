@@ -89,6 +89,15 @@ def _try_link_chain(session_id: str, cwd: str) -> str:
                 f"[session_chain] Parent session: {linked.parent_session_id}"
                 f" | chain: {linked.chain_id}{task_part}"
             )
+            if linked.worktree_path:
+                info += (
+                    f"\n⚠ You MUST cd to this worktree before any file operation:"
+                    f" {linked.worktree_path}"
+                )
+                logging.info(
+                    "chain: worktree_path=%s injected for child=%s",
+                    linked.worktree_path, session_id,
+                )
             logging.info(
                 "chain: bound child=%s to parent=%s chain=%s",
                 session_id, linked.parent_session_id, linked.chain_id,
