@@ -171,6 +171,7 @@ type: project
 ## Task State
 - **Primary Issue**: #N [title] (status)
 - **Branch**: <branch>
+- **Worktree**: <path, or omit if not using a git worktree>
 - **Completed**: <commits + what they did>
 - **In Progress**: <current step / blockers>
 - **Pending**: <remaining items>
@@ -226,6 +227,7 @@ db.record_handoff(
     child_session_id=None,  # bound later by child session's SessionStart hook
     project_dir=os.getcwd(),
     task_ref=os.environ.get('CLAUDE_HANDOFF_TASK_REF'),
+    worktree_path=os.environ.get('CLAUDE_HANDOFF_WORKTREE_PATH'),  # optional: git worktree path
 )
 print('session_chain edge recorded (child pending)')
 "

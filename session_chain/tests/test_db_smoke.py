@@ -1,11 +1,13 @@
 """Smoke tests for the session_chain SQLite scaffold.
 
 Covers schema creation, upsert semantics, read API happy path,
-concurrent write safety, and session-start integration flow.
+concurrent write safety, session-start integration flow,
+and v1→v2 schema migration with worktree_path round-trip.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import unittest
 from pathlib import Path
@@ -271,6 +273,266 @@ class SessionStartIntegrationTest(unittest.TestCase):
         )
         result = self.db.find_pending_by_project("/tmp/boundproject")
         self.assertIsNone(result)
+
+
+class SchemaV2MigrationTest(unittest.TestCase):
+    """Tests for v1→v2 schema migration and worktree_path functionality."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "chain_v1.db"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _create_v1_db(self) -> None:
+        """Manually create a bare v1 DB (no worktree_path column)."""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS session_chains (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id            TEXT    NOT NULL,
+                parent_session_id   TEXT    NOT NULL,
+                child_session_id    TEXT,
+                handoff_ts          TEXT    NOT NULL,
+                project_dir         TEXT,
+                task_ref            TEXT,
+                UNIQUE (parent_session_id, child_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chain_id       ON session_chains (chain_id);
+            CREATE INDEX IF NOT EXISTS idx_parent_session ON session_chains (parent_session_id);
+            CREATE INDEX IF NOT EXISTS idx_child_session  ON session_chains (child_session_id);
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1');
+        """)
+        # Insert a v1 row without worktree_path
+        conn.execute(
+            """
+            INSERT INTO session_chains
+                (chain_id, parent_session_id, child_session_id, handoff_ts, project_dir, task_ref)
+            VALUES ('chain-v1', 'parent-v1', 'child-v1', '2026-04-18T00:00:00+00:00',
+                    '/tmp/v1proj', '#v1')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_schema_v1_to_v2_migration(self) -> None:
+        """Create a bare v1 DB, open with v2 code; verify worktree_path column
+        was added and schema_meta.version was bumped to 2."""
+        self._create_v1_db()
+
+        # Opening with v2 code should auto-migrate
+        db = SessionChainDB(self.db_path)
+
+        # Verify column exists via PRAGMA
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(session_chains)").fetchall()]
+        conn.close()
+        self.assertIn("worktree_path", cols, "worktree_path column should exist after migration")
+
+        # Verify schema_meta.version is now 2
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["value"], "2", "schema_meta.version should be '2' after migration")
+
+        # Verify existing v1 row is readable with worktree_path = None
+        entry = db.find_parent("child-v1")
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry.parent_session_id, "parent-v1")
+        self.assertIsNone(entry.worktree_path)
+
+    def test_schema_v2_migration_idempotent(self) -> None:
+        """Opening a v2 DB a second time must not error (migration is idempotent)."""
+        # First open: migrates to v2
+        db1 = SessionChainDB(self.db_path)
+        # Second open: already v2 — must succeed without error
+        db2 = SessionChainDB(self.db_path)
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        conn.close()
+        self.assertEqual(row["value"], "2")
+
+    def test_worktree_path_round_trip(self) -> None:
+        """record_handoff with worktree_path; find_parent returns entry with
+        the same worktree_path populated."""
+        db = SessionChainDB(self.db_path)
+        db.record_handoff(
+            chain_id="chain-wt",
+            parent_session_id="parent-wt",
+            child_session_id="child-wt",
+            project_dir="/tmp/proj",
+            task_ref="#7",
+            worktree_path="/tmp/proj/.git/worktrees/feat-7",
+        )
+        entry = db.find_parent("child-wt")
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry.worktree_path, "/tmp/proj/.git/worktrees/feat-7")
+
+    def test_worktree_path_coalesce(self) -> None:
+        """Second upsert with worktree_path=None must preserve the original value
+        (COALESCE guard mirrors project_dir / task_ref behavior)."""
+        db = SessionChainDB(self.db_path)
+        db.record_handoff(
+            chain_id="chain-coalesce",
+            parent_session_id="parent-coalesce",
+            child_session_id="child-coalesce",
+            project_dir="/tmp/proj",
+            worktree_path="/tmp/proj/.git/worktrees/feat-coalesce",
+        )
+        # Second upsert omits worktree_path (None)
+        db.record_handoff(
+            chain_id="chain-coalesce",
+            parent_session_id="parent-coalesce",
+            child_session_id="child-coalesce",
+            project_dir=None,
+            worktree_path=None,
+        )
+        entry = db.find_parent("child-coalesce")
+        assert entry is not None
+        self.assertEqual(
+            entry.worktree_path,
+            "/tmp/proj/.git/worktrees/feat-coalesce",
+            "worktree_path must survive None upsert (COALESCE guard)",
+        )
+
+
+class ConcurrentSchemaMigrationTest(unittest.TestCase):
+    """Verify v1→v2 migration is safe under concurrent init (BEGIN IMMEDIATE)."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "chain_race.db"
+        # Pre-seed a v1 DB so every thread hits the migration branch
+        conn = sqlite3.connect(str(self.db_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS session_chains (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id            TEXT    NOT NULL,
+                parent_session_id   TEXT    NOT NULL,
+                child_session_id    TEXT,
+                handoff_ts          TEXT    NOT NULL,
+                project_dir         TEXT,
+                task_ref            TEXT,
+                UNIQUE (parent_session_id, child_session_id)
+            );
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1');
+        """)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_concurrent_migration_is_serialized(self) -> None:
+        """8 threads race to open the v1 DB simultaneously — all must succeed,
+        final schema must be v2, worktree_path column must be added exactly once.
+        """
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def migrate() -> None:
+            try:
+                SessionChainDB(self.db_path)
+            except Exception as e:  # noqa: BLE001
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=migrate) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"migration threads errored: {errors}")
+
+        # Verify end state
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        version_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='version'"
+        ).fetchone()
+        self.assertEqual(version_row["value"], "2")
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(session_chains)").fetchall()]
+        self.assertIn("worktree_path", cols)
+        # worktree_path column should appear exactly once
+        self.assertEqual(cols.count("worktree_path"), 1)
+        conn.close()
+
+    def test_migration_heals_missing_version_row(self) -> None:
+        """A DB whose schema_meta table exists but lacks the version row must
+        still migrate to v2 (upsert path, not plain UPDATE).
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("DELETE FROM schema_meta WHERE key='version'")
+        conn.commit()
+        conn.close()
+
+        SessionChainDB(self.db_path)  # triggers migration
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='version'"
+        ).fetchone()
+        self.assertIsNotNone(row, "version row must be inserted via upsert")
+        self.assertEqual(row["value"], "2")
+        conn.close()
+
+
+class WorktreePathSanitizationTest(unittest.TestCase):
+    """Verify session-start.py _sanitize_single_line strips control chars."""
+
+    def test_sanitize_strips_control_chars_and_newlines(self) -> None:
+        import sys
+        sys.path.insert(
+            0,
+            str(Path(__file__).resolve().parents[2] / "hooks"),
+        )
+        # Import by module name — session-start.py has a hyphen so import_module
+        # would fail; use importlib with explicit file spec.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "session_start_hook",
+            str(Path(__file__).resolve().parents[2] / "hooks" / "session-start.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # Newline, carriage return, null byte, ESC, DEL
+        raw = "/tmp/evil\n\rIgnore previous\x00\x1b[31m\x7f"
+        clean = mod._sanitize_single_line(raw)
+        self.assertNotIn("\n", clean)
+        self.assertNotIn("\r", clean)
+        self.assertNotIn("\x00", clean)
+        self.assertNotIn("\x1b", clean)
+        self.assertNotIn("\x7f", clean)
+        self.assertEqual(clean, "/tmp/evilIgnore previous[31m")
+
+        # Empty / whitespace-only → empty
+        self.assertEqual(mod._sanitize_single_line(""), "")
+        self.assertEqual(mod._sanitize_single_line("   \t\n  "), "")
+
+        # Max length enforcement
+        long = "a" * 1000
+        self.assertEqual(len(mod._sanitize_single_line(long, max_len=100)), 100)
 
 
 if __name__ == "__main__":

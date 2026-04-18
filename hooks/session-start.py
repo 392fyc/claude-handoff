@@ -51,6 +51,25 @@ def encode_project_path(path: str) -> str:
     return path.replace(":", "-").replace("\\", "-").replace("/", "-").lstrip("-")
 
 
+# Control chars (C0 + DEL + C1), newlines, tabs — everything that could
+# break the single-line directive or inject extra prompt structure.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1F\x7F-\x9F]")
+
+
+def _sanitize_single_line(value: str, max_len: int = 512) -> str:
+    """Strip control chars/newlines and trim. Returns '' for empty/invalid input.
+
+    Used before splicing user- or DB-sourced text into additionalContext to
+    prevent prompt injection via embedded newlines or control sequences.
+    """
+    if not value:
+        return ""
+    cleaned = _CONTROL_CHAR_RE.sub("", value).strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned
+
+
 def _try_link_chain(session_id: str, cwd: str) -> str:
     """Attempt to find a pending chain row for cwd, bind this session, and
     return a short context string. Returns empty string on any failure.
@@ -89,6 +108,25 @@ def _try_link_chain(session_id: str, cwd: str) -> str:
                 f"[session_chain] Parent session: {linked.parent_session_id}"
                 f" | chain: {linked.chain_id}{task_part}"
             )
+            if linked.worktree_path:
+                # Sanitize: strip control chars + newlines to prevent prompt
+                # injection via malicious worktree_path values. Keep a single
+                # line of printable chars only.
+                safe_wt = _sanitize_single_line(linked.worktree_path)
+                if safe_wt:
+                    info += (
+                        f"\n⚠ You MUST cd to this worktree before any file operation:"
+                        f" {safe_wt}"
+                    )
+                    logging.info(
+                        "chain: worktree_path=%s injected for child=%s",
+                        safe_wt, session_id,
+                    )
+                else:
+                    logging.warning(
+                        "chain: worktree_path for child=%s was empty after sanitization",
+                        session_id,
+                    )
             logging.info(
                 "chain: bound child=%s to parent=%s chain=%s",
                 session_id, linked.parent_session_id, linked.chain_id,
