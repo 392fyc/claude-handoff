@@ -409,5 +409,131 @@ class SchemaV2MigrationTest(unittest.TestCase):
         )
 
 
+class ConcurrentSchemaMigrationTest(unittest.TestCase):
+    """Verify v1→v2 migration is safe under concurrent init (BEGIN IMMEDIATE)."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.db_path = Path(self._tmp.name) / "chain_race.db"
+        # Pre-seed a v1 DB so every thread hits the migration branch
+        conn = sqlite3.connect(str(self.db_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS session_chains (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id            TEXT    NOT NULL,
+                parent_session_id   TEXT    NOT NULL,
+                child_session_id    TEXT,
+                handoff_ts          TEXT    NOT NULL,
+                project_dir         TEXT,
+                task_ref            TEXT,
+                UNIQUE (parent_session_id, child_session_id)
+            );
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1');
+        """)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_concurrent_migration_is_serialized(self) -> None:
+        """8 threads race to open the v1 DB simultaneously — all must succeed,
+        final schema must be v2, worktree_path column must be added exactly once.
+        """
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def migrate() -> None:
+            try:
+                SessionChainDB(self.db_path)
+            except Exception as e:  # noqa: BLE001
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=migrate) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"migration threads errored: {errors}")
+
+        # Verify end state
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        version_row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='version'"
+        ).fetchone()
+        self.assertEqual(version_row["value"], "2")
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(session_chains)").fetchall()]
+        self.assertIn("worktree_path", cols)
+        # worktree_path column should appear exactly once
+        self.assertEqual(cols.count("worktree_path"), 1)
+        conn.close()
+
+    def test_migration_heals_missing_version_row(self) -> None:
+        """A DB whose schema_meta table exists but lacks the version row must
+        still migrate to v2 (upsert path, not plain UPDATE).
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("DELETE FROM schema_meta WHERE key='version'")
+        conn.commit()
+        conn.close()
+
+        SessionChainDB(self.db_path)  # triggers migration
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='version'"
+        ).fetchone()
+        self.assertIsNotNone(row, "version row must be inserted via upsert")
+        self.assertEqual(row["value"], "2")
+        conn.close()
+
+
+class WorktreePathSanitizationTest(unittest.TestCase):
+    """Verify session-start.py _sanitize_single_line strips control chars."""
+
+    def test_sanitize_strips_control_chars_and_newlines(self) -> None:
+        import sys
+        sys.path.insert(
+            0,
+            str(Path(__file__).resolve().parents[2] / "hooks"),
+        )
+        # Import by module name — session-start.py has a hyphen so import_module
+        # would fail; use importlib with explicit file spec.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "session_start_hook",
+            str(Path(__file__).resolve().parents[2] / "hooks" / "session-start.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # Newline, carriage return, null byte, ESC, DEL
+        raw = "/tmp/evil\n\rIgnore previous\x00\x1b[31m\x7f"
+        clean = mod._sanitize_single_line(raw)
+        self.assertNotIn("\n", clean)
+        self.assertNotIn("\r", clean)
+        self.assertNotIn("\x00", clean)
+        self.assertNotIn("\x1b", clean)
+        self.assertNotIn("\x7f", clean)
+        self.assertEqual(clean, "/tmp/evilIgnore previous[31m")
+
+        # Empty / whitespace-only → empty
+        self.assertEqual(mod._sanitize_single_line(""), "")
+        self.assertEqual(mod._sanitize_single_line("   \t\n  "), "")
+
+        # Max length enforcement
+        long = "a" * 1000
+        self.assertEqual(len(mod._sanitize_single_line(long, max_len=100)), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

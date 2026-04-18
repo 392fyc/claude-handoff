@@ -88,28 +88,45 @@ class SessionChainDB:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with closing(self._connect()) as conn, conn:
+        with closing(self._connect()) as conn:
             conn.executescript(SCHEMA_BASE_V1)
-            # Detect current schema version
-            row = conn.execute(
-                "SELECT value FROM schema_meta WHERE key='version'"
-            ).fetchone()
-            current = int(row["value"]) if row else 1
-            if current < 2:
-                # Use PRAGMA table_info to make ADD COLUMN idempotent
-                cols = [
-                    r["name"]
-                    for r in conn.execute(
-                        "PRAGMA table_info(session_chains)"
-                    ).fetchall()
-                ]
-                if "worktree_path" not in cols:
+            # BEGIN IMMEDIATE: acquire RESERVED lock before reading version,
+            # serializing concurrent migrators. Without this, two processes
+            # could both pass the column-check and race on ALTER TABLE.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT value FROM schema_meta WHERE key='version'"
+                ).fetchone()
+                current = int(row["value"]) if row else 1
+                if current < 2:
+                    cols = [
+                        r["name"]
+                        for r in conn.execute(
+                            "PRAGMA table_info(session_chains)"
+                        ).fetchall()
+                    ]
+                    if "worktree_path" not in cols:
+                        try:
+                            conn.execute(
+                                "ALTER TABLE session_chains ADD COLUMN worktree_path TEXT"
+                            )
+                        except sqlite3.OperationalError as exc:
+                            # Defensive: another process won the race between
+                            # PRAGMA check and ALTER. "duplicate column name"
+                            # is harmless; re-raise anything else.
+                            if "duplicate column" not in str(exc).lower():
+                                raise
+                    # Upsert version row: UPDATE alone silently no-ops if the
+                    # row is missing (legacy DBs without schema_meta entry).
                     conn.execute(
-                        "ALTER TABLE session_chains ADD COLUMN worktree_path TEXT"
+                        "INSERT INTO schema_meta(key, value) VALUES('version', '2') "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
                     )
-                conn.execute(
-                    "UPDATE schema_meta SET value='2' WHERE key='version'"
-                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
