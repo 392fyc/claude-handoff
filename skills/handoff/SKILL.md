@@ -296,14 +296,25 @@ SHORT_PROMPT="Continue from session handoff. The SessionStart hook injects the f
 Replace `<encoded_cwd>` using the same `encode_project_path()` logic from
 Step 2 (`:` `\` `/` → `-`, strip leading `-`).
 
+**Optional flag propagation**: if `CLAUDE_HANDOFF_AUTO_LAUNCH_FLAGS` is set
+in the user's environment (e.g. via `~/.claude/settings.json` env block),
+its contents are injected into the launch command between `claude` and the
+`--` sentinel. This lets users propagate per-session flags like
+`--channels server:my-channel --dangerously-load-development-channels` to
+auto-spawned sessions without editing this skill. When the env var is
+unset, expansion is empty and the command behaves as before.
+
+Use the `${CLAUDE_HANDOFF_AUTO_LAUNCH_FLAGS:-}` form so an unset variable
+expands to nothing rather than a literal `${...}`.
+
 **Windows** (Windows Terminal, new tab):
 ```bash
-wt -w 0 nt --title "Handoff" -d "<cwd>" -- claude -- "$SHORT_PROMPT"
+wt -w 0 nt --title "Handoff" -d "<cwd>" -- claude ${CLAUDE_HANDOFF_AUTO_LAUNCH_FLAGS:-} -- "$SHORT_PROMPT"
 ```
 
 **macOS / Linux with tmux** (real new window, detached from current TTY):
 ```bash
-tmux new-window -n handoff "claude -- '$SHORT_PROMPT'"
+tmux new-window -n handoff "claude ${CLAUDE_HANDOFF_AUTO_LAUNCH_FLAGS:-} -- '$SHORT_PROMPT'"
 ```
 
 **macOS / Linux without tmux** — there is no portable "new terminal"
@@ -312,7 +323,7 @@ primitive. Use `tmux new-session -d` or the terminal emulator's own CLI
 `gnome-terminal --` on Linux). Otherwise fall back to manual mode.
 
 ```bash
-tmux new-session -d -s handoff "claude -- '$SHORT_PROMPT'"
+tmux new-session -d -s handoff "claude ${CLAUDE_HANDOFF_AUTO_LAUNCH_FLAGS:-} -- '$SHORT_PROMPT'"
 ```
 
 The positional argument after `--` is the session's first user message —
